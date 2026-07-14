@@ -1,0 +1,95 @@
+# StormStream local stack: Kafka (KRaft, no zookeeper) + Postgres.
+# Run from the repo root with:  docker compose -f docker/docker-compose.yml --env-file .env up -d
+
+name: stormstream
+
+services:
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: stormstream-kafka
+    ports:
+      - "9092:9092"   # host access (poller / spark running outside docker)
+    environment:
+      # single node acting as both broker and controller
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # two listeners for the broker: INTERNAL for other containers, EXTERNAL for my laptop
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+      # replication factor has to be 1 since there is only one broker
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # short retention, this is a live demo and not an event store
+      KAFKA_LOG_RETENTION_HOURS: 48
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+    networks:
+      - stormstream-net
+
+  # one-shot container that creates the topic once kafka is healthy, then exits
+  kafka-init:
+    image: apache/kafka:3.8.0
+    container_name: stormstream-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 \
+          --create --if-not-exists \
+          --topic $${ALERTS_TOPIC} \
+          --partitions $${ALERTS_TOPIC_PARTITIONS} \
+          --replication-factor 1
+        echo "topic ready:"
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --describe --topic $${ALERTS_TOPIC}
+    environment:
+      ALERTS_TOPIC: ${ALERTS_TOPIC:-weather-alerts}
+      ALERTS_TOPIC_PARTITIONS: ${ALERTS_TOPIC_PARTITIONS:-4}
+    networks:
+      - stormstream-net
+    restart: "no"
+
+  postgres:
+    image: postgres:16
+    container_name: stormstream-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-stormstream}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stormstream}
+      POSTGRES_DB: ${POSTGRES_DB:-stormstream}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # session 3 will drop the table definitions into this folder
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-stormstream} -d ${POSTGRES_DB:-stormstream}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - stormstream-net
+
+networks:
+  stormstream-net:
+    name: stormstream-net
+
+volumes:
+  kafka_data:
+  pg_data:
