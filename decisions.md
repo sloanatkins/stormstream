@@ -13,3 +13,19 @@ Running log of build decisions. Newest at the bottom.
 **Replication factor 1 everywhere.** One broker only, so anything higher would fail on startup. Fine for a portfolio demo and I'll say so in the README.
 
 **Postgres schema left out on purpose.** Tables come in session 3 so I can test writes by hand before Spark touches them. The compose file already mounts `docker/postgres/init` for that.
+
+## Session 2: NWS poller + Kafka producer
+
+**Seen-store in SQLite instead of an in-memory dict.** A dict forgets everything on restart, so every active alert would be re-sent as new. SQLite ships with Python and keeps the state in one file. Considered Redis but rejected it because it is another container for one small table.
+
+**Alerts that disappear from the feed are sent as `expired`.** NWS never announces that an alert ended, it just stops listing it. Comparing each poll to the last one is the only way to catch that.
+
+**Revised alerts arrive as a new id.** NWS issues a revision as a brand new alert that points back to the old one in `references`. So a revision shows up as the old id expiring and a new id going active, and the two cancel out in the window counts. I could link them using `references` but decided it is not worth the extra code for this project.
+
+**The store is only saved after the Kafka flush works.** If Kafka is down the cycle fails before the save, and the same changes are sent again next cycle. That makes delivery at-least-once, so the Postgres sink has to upsert on alert_id.
+
+**Region comes from the first UGC code, not areaDesc.** areaDesc is free text like "Lake, FL; Volusia, FL". UGC codes start with the state, so the first two letters make a clean Kafka key.
+
+**Bad alerts go to dead_letter.jsonl and only Actual alerts are kept.** A missing region means no Kafka key, so the alert is logged with the reason and skipped instead of crashing the loop. Test and Exercise alerts are filtered out.
+
+**Still in the feed does not mean still active.** One alert had an expires time more than an hour in the past and NWS was still listing it. The dashboard should filter on expires_at too.
