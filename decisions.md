@@ -29,3 +29,17 @@ Running log of build decisions. Newest at the bottom.
 **Bad alerts go to dead_letter.jsonl and only Actual alerts are kept.** A missing region means no Kafka key, so the alert is logged with the reason and skipped instead of crashing the loop. Test and Exercise alerts are filtered out.
 
 **Still in the feed does not mean still active.** One alert had an expires time more than an hour in the past and NWS was still listing it. The dashboard should filter on expires_at too.
+
+## Session 3: Postgres tables
+
+**TIMESTAMPTZ instead of TIMESTAMP.** The ADD says TIMESTAMP, but my timestamps are all UTC with a +00:00 offset and plain TIMESTAMP silently drops the timezone. TIMESTAMPTZ keeps it, so there is no guessing which clock a time is on.
+
+**CHECK constraints on severity, status and counts.** The data quality rules from the tech spec are enforced by the database as well as by the poller. I tested a made-up severity and a negative count by hand and both were rejected, so a bug in my Python can't put bad rows in.
+
+**raw_alerts is one row per alert, upserted on alert_id.** An alert can arrive as active, then updated, then expired, and the row always holds the latest state. Kafka delivery is at-least-once, so the same message can show up twice, and the upsert makes that harmless.
+
+**Added window_type to alert_window_agg and made it part of the primary key.** The ADD only has one aggregate table, but the spark job writes both 5 minute tumbling windows and 15 minute sliding windows. Without a type column the two would collide on the same start time. The key is also what lets a late alert overwrite a window's old count.
+
+**pipeline_heartbeat has its own BIGSERIAL id.** Spark's batch_id restarts at 0 if the checkpoint folder is deleted, so using it as the primary key would collide with old rows. The dashboard just reads the newest row by written_at.
+
+**Init SQL lives in docker/postgres/init, and I also applied it by hand.** Postgres only runs those files when the data volume is empty. A fresh clone gets the tables automatically, but my existing volume needed the manual run. I'll check the fresh clone case in session 9.
