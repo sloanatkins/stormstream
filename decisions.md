@@ -43,3 +43,17 @@ Running log of build decisions. Newest at the bottom.
 **pipeline_heartbeat has its own BIGSERIAL id.** Spark's batch_id restarts at 0 if the checkpoint folder is deleted, so using it as the primary key would collide with old rows. The dashboard just reads the newest row by written_at.
 
 **Init SQL lives in docker/postgres/init, and I also applied it by hand.** Postgres only runs those files when the data volume is empty. A fresh clone gets the tables automatically, but my existing volume needed the manual run. I'll check the fresh clone case in session 9.
+
+## Session 4: Spark reads Kafka and writes Postgres
+
+**Dedicated Python 3.12 conda env.** The PySpark 4.0.1 docs say Python 3.9 or newer but never mention 3.13, which is what my base env had. A project env was safer, and it keeps requirements.txt honest.
+
+**psycopg2 inside foreachBatch instead of Spark's JDBC writer.** The JDBC writer can only append or overwrite, there is no ON CONFLICT. A batch is a few rows, so pulling them to the driver and upserting is fine. At real volume I would write to a staging table and MERGE.
+
+**Keep only the latest row per alert_id within a batch.** Postgres refuses a single upsert that touches the same row twice. I sort by Kafka offset, which is the true order because one alert always has the same key and so the same partition.
+
+**Timestamps leave Spark as ISO text with +00:00.** PySpark hands python naive datetimes in the laptop's timezone, which would have shifted every time by 4 hours. Text with an explicit offset cannot be misread.
+
+**Bad messages go to dead_letter_events, unique on (partition, offset).** Reading the same message twice cannot create duplicates. Tested by running the job twice, still 4 alerts and 4 dead letters.
+
+**Postgres container moved to host port 15432.** My laptop already has Postgres on 5432 and the MacroLens container is on 5433, so the Spark job kept connecting to the wrong database. Containers still reach each other on 5432 inside the Docker network.

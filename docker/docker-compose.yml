@@ -69,7 +69,7 @@ services:
     image: postgres:16
     container_name: stormstream-postgres
     ports:
-      - "5432:5432"
+      - "15432:5432"   # 15432 on the laptop, other postgres servers already use 5432 and 5433
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-stormstream}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stormstream}

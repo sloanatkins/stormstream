@@ -1,0 +1,5 @@
+requests
+kafka-python>=2.1.0
+pyspark==4.0.1
+psycopg2-binary
+pytest
