@@ -73,3 +73,13 @@ Running log of build decisions. Newest at the bottom.
 **Duplicate deliveries.** Kafka is at-least-once, so the same message can show up twice. raw_alerts handles that with an upsert, but my window counts were counting events, so a replay inflated them. I resent late-1 a few times and the count went from 2 to 4. Fixed it with dropDuplicatesWithinWatermark on (alert_id, status, severity, expires_at). A real update changes severity or expiry so it still counts, and an exact replay gets dropped. After the fix the same window shows 2.
 
 **Cost of the fix.** Adding the dedupe changed what the window checkpoints store, so I had to delete the tumbling and sliding checkpoints and truncate alert_window_agg once. raw_alerts kept its checkpoint.
+
+## Session 6: heartbeat
+
+**Heartbeat table is written by the Spark job, one row per batch.** Each row has the batch id and how many Kafka messages that batch read, written in the same transaction as the upserts, so a heartbeat only exists if the batch actually committed.
+
+**Batch heartbeats alone were not enough.** Spark does not run a batch when no new messages arrive, so during a quiet stretch the table stopped updating. I tested it: one test message, then nothing, and the newest heartbeat just kept getting older (115 seconds, then 217) while the job was fine. A dashboard reading that would call a healthy pipeline dead whenever NWS is quiet.
+
+**Fix: idle heartbeat from the main loop.** The program now wakes every 15 seconds and writes an idle row (batch_id -1, 0 events) if nothing has been written in the last 30 seconds. If any streaming query crashes, awaitAnyTermination raises and the loop ends, so a dead job stops heartbeating and the dashboard can show it as stale. The dashboard should treat a heartbeat older than about a minute as a problem.
+
+**consumer_lag is left empty for now.** I did not want to guess at a number. Will revisit if there is time.
