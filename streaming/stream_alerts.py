@@ -4,6 +4,7 @@
   3. 15 minute sliding window counts (every 5 min) -> alert_window_agg
 """
 import os
+import time
 from datetime import datetime, timezone
 
 import psycopg2
@@ -80,6 +81,30 @@ def pg_connect():
     )
 
 
+PG_TRIES = 6
+
+
+def pg_run(work):
+    """open a connection and run work(cur) as one transaction. if postgres can't be
+    reached, wait a little longer each time and try again before giving up"""
+    for attempt in range(1, PG_TRIES + 1):
+        conn = None
+        try:
+            conn = pg_connect()
+            with conn, conn.cursor() as cur:  # commits if it works, rolls back if it fails
+                work(cur)
+            return
+        except psycopg2.OperationalError as e:
+            if attempt == PG_TRIES:
+                raise
+            wait = 2 * attempt
+            print(f"!!! postgres problem (try {attempt}/{PG_TRIES}), retrying in {wait}s: {str(e).splitlines()[0]}")
+            time.sleep(wait)
+        finally:
+            if conn:
+                conn.close()
+
+
 def iso_col(c):
     # timestamp -> text with an explicit +00:00. pyspark would otherwise hand python
     # a naive datetime in my laptop's timezone and shift everything by 4 hours
@@ -140,17 +165,15 @@ def process_batch(batch_df, batch_id):
                 r.expires_at, r.status, r.ingested_at) for r in latest.values()]
     dead = [(r.raw, r.reason, r.partition, r.offset) for r in bad_rows]
 
-    conn = pg_connect()
-    try:
-        with conn, conn.cursor() as cur:  # commits if it works, rolls back if it fails
-            if upserts:
-                execute_values(cur, UPSERT_SQL, upserts)
-            if dead:
-                execute_values(cur, DEAD_LETTER_SQL, dead)
-            # one heartbeat row per batch: how many messages this batch read (good and bad)
-            cur.execute(HEARTBEAT_SQL, (batch_id, len(good_rows) + len(bad_rows)))
-    finally:
-        conn.close()
+    def write(cur):
+        if upserts:
+            execute_values(cur, UPSERT_SQL, upserts)
+        if dead:
+            execute_values(cur, DEAD_LETTER_SQL, dead)
+        # one heartbeat row per batch: how many messages this batch read (good and bad)
+        cur.execute(HEARTBEAT_SQL, (batch_id, len(good_rows) + len(bad_rows)))
+
+    pg_run(write)
 
     print(f"--- raw_alerts batch {batch_id}: wrote {len(upserts)} alerts, {len(dead)} dead letters")
 
@@ -173,12 +196,7 @@ def make_window_writer(window_type):
                 for r in batch_df.collect()]
         if not rows:
             return
-        conn = pg_connect()
-        try:
-            with conn, conn.cursor() as cur:
-                execute_values(cur, WINDOW_UPSERT_SQL, rows)
-        finally:
-            conn.close()
+        pg_run(lambda cur: execute_values(cur, WINDOW_UPSERT_SQL, rows))
         print(f"--- {window_type} batch {batch_id}: upserted {len(rows)} window rows")
     return write
 
@@ -222,12 +240,7 @@ IDLE_HEARTBEAT_SQL = """
 
 
 def write_idle_heartbeat():
-    conn = pg_connect()
-    try:
-        with conn, conn.cursor() as cur:
-            cur.execute(IDLE_HEARTBEAT_SQL)
-    finally:
-        conn.close()
+    pg_run(lambda cur: cur.execute(IDLE_HEARTBEAT_SQL))
 
 
 while not spark.streams.awaitAnyTermination(15):  # False means "15 seconds passed, nothing died"
