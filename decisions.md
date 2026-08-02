@@ -89,3 +89,15 @@ Running log of build decisions. Newest at the bottom.
 **Dead letters.** Two kinds of bad message reach the dead_letter_events table: text that is not JSON ("not valid JSON or no known fields") and valid JSON that breaks a rule, like a severity that is not allowed ("missing or invalid field"). I tested both. The raw text is kept along with the partition and offset, and none of them end up in raw_alerts. The table has a unique key on (partition, offset), so reading the same message twice does not create two rows.
 
 **Batch latency.** A message took about 70 seconds from send to showing up in Postgres on my laptop, because three queries share one machine and each batch has to finish before the next starts. Fine for a portfolio demo, but the README should say end to end latency is around a minute locally and would be lower on a real cluster.
+
+## Session 7: dashboard
+
+**Streamlit only reads Postgres.** It never touches Kafka or Spark, so the dashboard keeps working (with stale data) if the stream is down, and I can say exactly how fresh it is from the heartbeat.
+
+**Active means not expired, not just status active.** An alert can pass its expires_at before the poller notices it left the NWS feed, so the dashboard filters on both status and expires_at. Of the 452 alerts the poller saw on a fresh start, 337 passed that filter.
+
+**Health panel reads the heartbeat table.** Green if the newest heartbeat is under 60 seconds old, red if not. I tested it by stopping the Spark job: the box went red at 74 seconds and went back to green after a restart. Because of the idle heartbeat from Session 6, a quiet pipeline stays green and a dead one turns red.
+
+**The first poll makes one huge bar in the window chart.** Windows use ingestion time, and on a fresh start all 452 current alerts arrive at once, so about 450 events land in a single window. That is the first snapshot, not 450 new alerts in five minutes. After that the poller only sends changes and the bars are small. For the demo I will record after the poller has been running for a while.
+
+**Auto refresh every 15 seconds** with a Streamlit fragment, and a 10 second cache on each query so the page is not hammering Postgres. Filters sit in the sidebar because widgets there cannot live inside a fragment.
