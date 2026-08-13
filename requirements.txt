@@ -1,8 +1,8 @@
-requests
-kafka-python>=2.1.0
+requests==2.34.2
+kafka-python==3.0.11
 pyspark==4.0.1
-psycopg2-binary
-pytest
-streamlit
-pandas
-plotly
+psycopg2-binary==2.9.13
+pytest==9.1.1
+streamlit==1.66.0
+pandas==3.0.6
+plotly==7.1.0
