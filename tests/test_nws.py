@@ -1,10 +1,34 @@
+"""
+NWS Parsing Tests
+=================
+
+Tests for poller/nws.py. They check that a raw NWS alert is cleaned
+into the format the pipeline expects, and that alerts missing something
+we can't work without are rejected.
+
+Covered:
+- a good alert is cleaned (id, event, severity, region, status)
+- times are converted to UTC
+- missing or unknown severity falls back to "Unknown"
+- missing id, event, region or bad times raise BadAlert
+
+Run with:
+    python -m pytest tests/test_nws.py -v
+
+Dependencies:
+- pytest
+"""
+
 import pytest
 
 from poller.nws import BadAlert, parse_feature, to_utc
 
 
-def make_feature(**prop_changes):
-    # shaped like one item from the NWS "features" list
+# ── Helpers ───────────────────────────────────────────────────────────
+def make_feature(**prop_changes) -> dict:
+    """Build a fake NWS feature. Pass fields to override the defaults."""
+
+    # Shaped like one item from the NWS "features" list
     props = {
         "id": "urn:oid:test.1",
         "event": "Flood Watch",
@@ -17,6 +41,7 @@ def make_feature(**prop_changes):
     return {"properties": props}
 
 
+# ── A good alert ──────────────────────────────────────────────────────
 def test_good_feature_is_cleaned():
     ev = parse_feature(make_feature())
     assert ev["alert_id"] == "urn:oid:test.1"
@@ -37,6 +62,7 @@ def test_missing_expiry_becomes_none():
     assert ev["expires_at"] is None
 
 
+# ── Severity fallback ─────────────────────────────────────────────────
 def test_unknown_severity_falls_back_to_unknown():
     ev = parse_feature(make_feature(severity="Catastrophic"))
     assert ev["severity"] == "Unknown"
@@ -47,8 +73,9 @@ def test_missing_severity_falls_back_to_unknown():
     assert ev["severity"] == "Unknown"
 
 
+# ── Rejected alerts ───────────────────────────────────────────────────
 @pytest.mark.parametrize("field", ["id", "event"])
-def test_missing_required_field_is_rejected(field):
+def test_missing_required_field_is_rejected(field: str):
     with pytest.raises(BadAlert):
         parse_feature(make_feature(**{field: None}))
 
@@ -73,6 +100,7 @@ def test_feature_without_properties_is_rejected():
         parse_feature({})
 
 
+# ── Time conversion ───────────────────────────────────────────────────
 def test_to_utc_handles_other_offsets():
     assert to_utc("2026-10-13T10:11:00-05:00", "x") == "2026-10-13T15:11:00+00:00"
     assert to_utc("2026-10-13T15:11:00+00:00", "x") == "2026-10-13T15:11:00+00:00"

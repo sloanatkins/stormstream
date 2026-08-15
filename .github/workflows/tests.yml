@@ -1,3 +1,13 @@
+# Tests
+# =====
+#
+# Runs the pytest suite on every push to main and on every pull request.
+#
+# What it covers: the unit tests (poller parsing and diffing, and the Spark
+# parsing logic on a small local Spark session).
+# What it does not cover: Kafka and Postgres. There is no integration job,
+# the full pipeline is checked with scripts/smoke_test.sh on a real stack.
+
 name: tests
 
 on:
@@ -16,7 +26,7 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      # the spark tests start a small local spark session, which needs java
+      # The spark tests start a small local spark session, which needs java
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
