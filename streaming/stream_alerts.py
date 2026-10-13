@@ -81,7 +81,7 @@ def process_batch(batch_df, batch_id):
         F.col("a.expires_at").cast("timestamp").alias("expires_at"),
         F.col("a.status").alias("status"),
         F.col("a.ingested_at").cast("timestamp").alias("ingested_at"),
-        F.when(F.col("a").isNull(), "not valid JSON").otherwise("missing or invalid field").alias("reason"),
+        F.when(F.coalesce(*[F.col(f"a.{n}") for n in FIELDS]).isNull(), "not valid JSON or no known fields").otherwise("missing or invalid field").alias("reason"),
     )
 
     # valid = every required field present, and severity/status are allowed values
@@ -123,7 +123,8 @@ def process_batch(batch_df, batch_id):
 
 query = (
     raw.writeStream.foreachBatch(process_batch)
-    .trigger(availableNow=True)  # process what is already there, then stop
+    .option("checkpointLocation", "checkpoints/raw_alerts")  # bookmark of which offsets are done
+    .trigger(processingTime="10 seconds")  # look for new messages every 10s, runs until ctrl+c
     .start()
 )
 query.awaitTermination()

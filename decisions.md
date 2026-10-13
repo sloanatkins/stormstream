@@ -57,3 +57,5 @@ Running log of build decisions. Newest at the bottom.
 **Bad messages go to dead_letter_events, unique on (partition, offset).** Reading the same message twice cannot create duplicates. Tested by running the job twice, still 4 alerts and 4 dead letters.
 
 **Postgres container moved to host port 15432.** My laptop already has Postgres on 5432 and the MacroLens container is on 5433, so the Spark job kept connecting to the wrong database. Containers still reach each other on 5432 inside the Docker network.
+
+**Checkpoint folder plus a 10 second trigger.** The checkpoint is Spark's bookmark of which Kafka offsets are done. I tested it by stopping the job and restarting it: the next batch was number 2 and only handled the one new message, it did not re-read the old ones. startingOffsets=earliest only matters on the very first run now. The demo messages I sent by hand are still in the Kafka topic, so if I ever delete the checkpoint they will be read again, which is harmless because the writes are upserts.
