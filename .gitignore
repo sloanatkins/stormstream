@@ -6,3 +6,5 @@ __pycache__/
 checkpoints/
 *.sqlite
 .DS_Store
+
+poller/dead_letter.jsonl
