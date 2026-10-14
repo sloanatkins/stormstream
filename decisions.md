@@ -111,3 +111,11 @@ Running log of build decisions. Newest at the bottom.
 **Moved parse_alerts into its own file.** Importing stream_alerts.py starts the whole streaming job, so a test could not import it. parsing.py holds the validity logic and stream_alerts.py imports it.
 
 **The tests found a real bug.** On Spark 4, casting a malformed string to a timestamp throws an error instead of returning null, so my comment saying a bad timestamp becomes null was wrong. A message with a garbage timestamp would have crashed the job, and since the checkpoint cannot move past it, every restart would crash again. Fixed with try_cast, which returns null, so the message goes to dead letters. The poller checks timestamps itself, so this could only have been hit by a hand-sent or foreign message, but catching those is what the dead letter table is for.
+
+## Session 9: CI and clean clone
+
+**CI runs the tests on every push.** A GitHub Actions workflow sets up Python 3.12 and Java 21 (the Spark tests need Java), installs requirements.txt from scratch and runs pytest. First run was green in about a minute with all 30 tests. Because it installs on a blank machine, it also proves requirements.txt is complete.
+
+**CI only covers the unit tests.** It does not start Kafka or Postgres. The infrastructure is covered by the smoke test script and by running the full pipeline by hand, which is a known gap I would close with a docker compose job in CI if I kept building on this.
+
+**Clean clone check.** I removed the stack and its volumes, cloned the repo from GitHub into a new folder, copied .env.example to .env and ran docker compose up. The smoke test passed 9 of 9 and the init SQL created all four tables on its own on the empty volume. Then I ran the poller, the Spark job and the dashboard from the clone: 354 active alerts across 31 states, and git status stayed empty afterward, so nothing the pipeline writes is missing from .gitignore.
