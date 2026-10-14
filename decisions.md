@@ -59,3 +59,17 @@ Running log of build decisions. Newest at the bottom.
 **Postgres container moved to host port 15432.** My laptop already has Postgres on 5432 and the MacroLens container is on 5433, so the Spark job kept connecting to the wrong database. Containers still reach each other on 5432 inside the Docker network.
 
 **Checkpoint folder plus a 10 second trigger.** The checkpoint is Spark's bookmark of which Kafka offsets are done. I tested it by stopping the job and restarting it: the next batch was number 2 and only handled the one new message, it did not re-read the old ones. startingOffsets=earliest only matters on the very first run now. The demo messages I sent by hand are still in the Kafka topic, so if I ever delete the checkpoint they will be read again, which is harmless because the writes are upserts.
+
+## Session 5: windowing and watermarking
+
+**Event time is ingested_at, not effective_at.** NWS effective times can be hours in the past or future, which would scatter alerts across windows that have nothing to do with when the pipeline saw them. ingested_at is when my poller picked the alert up, so windows line up with pipeline activity.
+
+**Tumbling 5 minute and sliding 15 minute (5 minute slide) windows.** Both run in the same Spark app as separate queries. They write to one table, alert_window_agg, and a window_type column says which is which. I used update output mode and upsert on (window_type, window_start, region, severity), so a window row just gets overwritten as its count grows.
+
+**alert_count means alert activity.** It counts new or changed alert events (status active or updated) in a window and leaves out expired ones. It does not mean how many alerts are active right now. The dashboard will get that number from raw_alerts instead.
+
+**Watermark of 10 minutes.** Late events inside 10 minutes still get counted. Anything later is dropped from the windows but still lands in raw_alerts, so nothing is lost, it just does not change a closed window. I tested this with a late-1 message (counted) and a late-2 message (ignored for windows, kept in raw_alerts). A longer watermark would catch more late data but keeps state around longer.
+
+**Duplicate deliveries.** Kafka is at-least-once, so the same message can show up twice. raw_alerts handles that with an upsert, but my window counts were counting events, so a replay inflated them. I resent late-1 a few times and the count went from 2 to 4. Fixed it with dropDuplicatesWithinWatermark on (alert_id, status, severity, expires_at). A real update changes severity or expiry so it still counts, and an exact replay gets dropped. After the fix the same window shows 2.
+
+**Cost of the fix.** Adding the dedupe changed what the window checkpoints store, so I had to delete the tumbling and sliding checkpoints and truncate alert_window_agg once. raw_alerts kept its checkpoint.
