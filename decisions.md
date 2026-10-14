@@ -101,3 +101,13 @@ Running log of build decisions. Newest at the bottom.
 **The first poll makes one huge bar in the window chart.** Windows use ingestion time, and on a fresh start all 452 current alerts arrive at once, so about 450 events land in a single window. That is the first snapshot, not 450 new alerts in five minutes. After that the poller only sends changes and the bars are small. For the demo I will record after the poller has been running for a while.
 
 **Auto refresh every 15 seconds** with a Streamlit fragment, and a 10 second cache on each query so the page is not hammering Postgres. Filters sit in the sidebar because widgets there cannot live inside a fragment.
+
+## Session 8: tests
+
+**What is tested.** The diff logic (new, unchanged, updated, expired, duplicate ids), the NWS parser (good alert, every kind of bad alert, UTC conversion) and the Spark validity rules (valid, not JSON, bad severity or status, missing field, bad timestamp). None of the poller tests need Kafka or Docker, so they run in a fraction of a second. The Spark tests start a small local session and take about 15 seconds.
+
+**Tests have to be able to fail.** I broke the fingerprint on purpose by taking severity out of it, and exactly the two tests that should catch it failed. Then I restored the file.
+
+**Moved parse_alerts into its own file.** Importing stream_alerts.py starts the whole streaming job, so a test could not import it. parsing.py holds the validity logic and stream_alerts.py imports it.
+
+**The tests found a real bug.** On Spark 4, casting a malformed string to a timestamp throws an error instead of returning null, so my comment saying a bad timestamp becomes null was wrong. A message with a garbage timestamp would have crashed the job, and since the checkpoint cannot move past it, every restart would crash again. Fixed with try_cast, which returns null, so the message goes to dead letters. The poller checks timestamps itself, so this could only have been hit by a hand-sent or foreign message, but catching those is what the dead letter table is for.
