@@ -3,11 +3,42 @@ import os
 
 import pandas as pd
 import psycopg2
+import plotly.express as px
 import streamlit as st
 
 st.set_page_config(page_title="StormStream", layout="wide")
 
 SEVERITIES = ["Extreme", "Severe", "Moderate", "Minor", "Unknown"]
+# darkest red for the worst, fading down to gray, so the colors mean the same thing everywhere
+SEVERITY_COLORS = {
+    "Extreme": "#7f1d1d",
+    "Severe": "#dc2626",
+    "Moderate": "#f97316",
+    "Minor": "#eab308",
+    "Unknown": "#9ca3af",
+}
+WHITE_TEXT = {"Extreme", "Severe"}  # dark enough backgrounds for white text, the rest get dark text
+LOCAL_TZ = "America/New_York"
+
+# the region code is the first two letters of the NWS zone code, so it can also be a marine
+# zone (PZ, AM, GM...) or a territory (GU, PR). only these get drawn on the map
+US_STATES = set(
+    "AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT "
+    "NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY".split()
+)
+SEVERITY_RANK = {name: i for i, name in enumerate(SEVERITIES)}  # Extreme is 0, the worst
+
+
+def state_summary(active):
+    # one row per state: how many active alerts, and the worst severity among them
+    in_states = active[active["region"].isin(US_STATES)]
+    if in_states.empty:
+        return pd.DataFrame(columns=["State", "Worst", "Alerts"])
+    grouped = in_states.groupby("region").agg(
+        Alerts=("alert_id", "count"),
+        Worst=("severity", lambda s: min(s, key=SEVERITY_RANK.get)),
+    )
+    return grouped.reset_index().rename(columns={"region": "State"})
 
 
 def query(sql):
@@ -28,6 +59,19 @@ def query(sql):
         conn.close()
 
 
+def local_text(series, empty=""):
+    # timestamps come out of postgres in UTC. show them in eastern time like "Oct 14, 3:12 PM"
+    ts = pd.to_datetime(series, utc=True).dt.tz_convert(LOCAL_TZ)
+    return ts.dt.strftime("%b %-d, %-I:%M %p").fillna(empty)
+
+
+def color_severity(value):
+    if value not in SEVERITY_COLORS:
+        return ""
+    text = "white" if value in WHITE_TEXT else "#1f2937"
+    return f"background-color: {SEVERITY_COLORS[value]}; color: {text}; font-weight: 600"
+
+
 @st.cache_data(ttl=10)  # re-query at most every 10 seconds
 def load_active():
     # status alone is not enough. an alert can pass its expires_at before the poller
@@ -37,6 +81,7 @@ def load_active():
         FROM raw_alerts
         WHERE status IN ('active', 'updated')
           AND (expires_at IS NULL OR expires_at > now())
+          AND event_type <> 'Test Message'
         ORDER BY CASE severity WHEN 'Extreme' THEN 1 WHEN 'Severe' THEN 2
                  WHEN 'Moderate' THEN 3 WHEN 'Minor' THEN 4 ELSE 5 END,
                  effective_at DESC
@@ -59,9 +104,11 @@ def load_windows():
 
 @st.cache_data(ttl=10)
 def load_dead_letters():
+    # the smoke test sends a throwaway message on purpose, leave those out
     return query("""
         SELECT failed_at, reason, left(raw, 80) AS raw, kafka_partition, kafka_offset
         FROM dead_letter_events
+        WHERE raw IS NULL OR raw NOT LIKE 'smoke-%'
         ORDER BY failed_at DESC
         LIMIT 20
     """)
@@ -74,7 +121,7 @@ st.caption("US weather alerts, streamed from the NWS through Kafka and Spark int
 # nothing picked means no filter
 active_all = load_active()
 st.sidebar.header("Filters")
-states = st.sidebar.multiselect("State", sorted(active_all["region"].unique()))
+states = st.sidebar.multiselect("Region", sorted(active_all["region"].unique()))
 severities = st.sidebar.multiselect("Severity", SEVERITIES)
 
 
@@ -98,28 +145,95 @@ def live():
     col1, col2, col3 = st.columns(3)
     col1.metric("Active alerts", len(active))
     col2.metric("Severe or Extreme", int(active["severity"].isin(["Severe", "Extreme"]).sum()))
-    col3.metric("States affected", active["region"].nunique())
+    col3.metric("States affected", active.loc[active["region"].isin(US_STATES), "region"].nunique())
+
+    st.subheader("Where alerts are active")
+    summary = state_summary(active)
+    color_by = st.radio("Color states by", ["Number of alerts", "Worst severity"], horizontal=True)
+    if summary.empty:
+        st.info("No active alerts in US states with these filters.")
+    else:
+        hover = {"Alerts": True, "Worst": True, "State": False}
+        if color_by == "Worst severity":
+            fig = px.choropleth(
+                summary, locations="State", locationmode="USA-states", scope="usa",
+                color="Worst", color_discrete_map=SEVERITY_COLORS, category_orders={"Worst": SEVERITIES},
+                hover_data=hover,
+            )
+            fig.update_layout(legend=dict(orientation="h", x=0, y=0, title_text=""))
+        else:
+            fig = px.choropleth(
+                summary, locations="State", locationmode="USA-states", scope="usa",
+                color="Alerts", color_continuous_scale=["#fde8e8", "#b91c1c"], hover_data=hover,
+            )
+            fig.update_layout(coloraxis_colorbar=dict(title="Alerts", thickness=12))
+        fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    off_map = len(active) - int(active["region"].isin(US_STATES).sum())
+    what = "the worst active severity" if color_by == "Worst severity" else "the number of active alerts"
+    st.caption(f"Colored by {what} in each state. "
+               f"{off_map} alerts for marine zones and territories are not on the map.")
 
     st.subheader("Active alerts")
-    st.dataframe(active, use_container_width=True, hide_index=True, height=350)
+    view = pd.DataFrame({
+        "Region": active["region"],
+        "Event": active["event_type"],
+        "Severity": active["severity"],
+        "Effective": local_text(active["effective_at"]),
+        "Expires": local_text(active["expires_at"], empty="No expiry"),
+    })
+    styled = view.style.map(color_severity, subset=["Severity"])
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=350)
+    st.caption("Times are Eastern.")
 
-    st.subheader("Alert activity by window")
-    kind = st.radio("Window type", ["tumbling_5m", "sliding_15m"], horizontal=True)
+    st.subheader("Alert activity over time")
+    # friendly name -> (window_type in the table, minutes the window covers)
+    window_choices = {
+        "5-minute blocks": ("tumbling_5m", 5),
+        "15-minute rolling (every 5 min)": ("sliding_15m", 15),
+    }
+    col_a, col_b = st.columns(2)
+    choice = col_a.radio("Window", list(window_choices), horizontal=True)
+    span = col_b.radio("Show", ["Last hour", "Last 6 hours", "Everything"], index=1, horizontal=True)
+    window_type, minutes = window_choices[choice]
+
     windows = load_windows()
-    windows = windows[windows["window_type"] == kind]
+    windows = windows[windows["window_type"] == window_type].copy()
+    # label each bar by when its window ends, like "the 15 minutes ending at 4:05 PM"
+    windows["window_end"] = (pd.to_datetime(windows["window_start"], utc=True)
+                             + pd.Timedelta(minutes=minutes)).dt.tz_convert(LOCAL_TZ)
+    hours = {"Last hour": 1, "Last 6 hours": 6}.get(span)
+    if hours:
+        cutoff = pd.Timestamp.now(tz=LOCAL_TZ) - pd.Timedelta(hours=hours)
+        windows = windows[windows["window_end"] >= cutoff]
+
+    # the table has one row per state and severity, add them up so each color is one solid block
+    windows = windows.groupby(["window_end", "severity"], as_index=False)["alert_count"].sum()
+
     if windows.empty:
-        st.info("No window data yet.")
+        st.info("No window data in this time range.")
     else:
-        # one bar per window, split by severity
-        chart = windows.pivot_table(index="window_start", columns="severity",
-                                    values="alert_count", aggfunc="sum").fillna(0)
-        st.bar_chart(chart)
-    st.caption("Counts are new or changed alert events per window. Sliding windows overlap, "
-               "so the same event shows up in up to three of them.")
+        fig = px.bar(
+            windows, x="window_end", y="alert_count", color="severity",
+            color_discrete_map=SEVERITY_COLORS, category_orders={"severity": SEVERITIES},
+            labels={"window_end": "", "alert_count": "Alert events", "severity": ""},
+        )
+        fig.update_traces(width=4.2 * 60 * 1000)  # milliseconds, just under 5 minutes so bars do not touch
+        fig.update_xaxes(tickformat="%I:%M %p")
+        fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), legend=dict(orientation="h", x=0, y=-0.2))
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+    if minutes == 5:
+        what = "Each bar is the 5 minutes ending at that time."
+    else:
+        what = "Each bar is the 15 minutes ending at that time, updated every 5 minutes, so neighboring bars overlap."
+    st.caption(f"{what} Counts are new or changed alert events, in Eastern time.")
 
     st.subheader("Dead letters")
     st.caption("Messages the Spark job rejected. The raw text is kept for debugging.")
-    st.dataframe(load_dead_letters(), use_container_width=True, hide_index=True)
+    dead = load_dead_letters()
+    dead["failed_at"] = local_text(dead["failed_at"])
+    st.dataframe(dead, use_container_width=True, hide_index=True)
 
 
 live()

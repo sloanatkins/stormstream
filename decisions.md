@@ -119,3 +119,17 @@ Running log of build decisions. Newest at the bottom.
 **CI only covers the unit tests.** It does not start Kafka or Postgres. The infrastructure is covered by the smoke test script and by running the full pipeline by hand, which is a known gap I would close with a docker compose job in CI if I kept building on this.
 
 **Clean clone check.** I removed the stack and its volumes, cloned the repo from GitHub into a new folder, copied .env.example to .env and ran docker compose up. The smoke test passed 9 of 9 and the init SQL created all four tables on its own on the empty volume. Then I ran the poller, the Spark job and the dashboard from the clone: 354 active alerts across 31 states, and git status stayed empty afterward, so nothing the pipeline writes is missing from .gitignore.
+
+## Dashboard polish (went back to the Session 7 dashboard after Session 9)
+
+**One severity color scale everywhere.** Extreme is dark red, fading through red and orange to yellow and gray for Unknown. The first version let the chart pick colors alphabetically, so Extreme came out blue and Moderate red, which was misleading.
+
+**Region, not state.** The region is the first two letters of the NWS zone code, so it also includes marine zones (PZ, PK, AM) and territories like Guam. The table says Region, the map only draws the 50 states and DC with a note about how many alerts are left off, and the States affected number only counts real states.
+
+**Unknown severity is real.** I checked the live NWS feed and it sends Unknown itself for Air Quality Alerts and Hydrologic Outlooks. NWS test messages are filtered out of the dashboard.
+
+**Map has two views.** Worst active severity per state, or number of alerts. The worst severity view is almost all red because NWS grades Watches as Severe, so the count view is the default.
+
+**Chart bars are labeled by when the window ends** ("the 15 minutes ending at 4:05 PM") with plain names instead of tumbling_5m and sliding_15m, and a last hour / 6 hours / everything switch.
+
+**The startup spike is a known limitation.** On a fresh start the first poll reports every active alert as new, so one window shows about 470 events. Fixing it properly means marking the first poll as a snapshot all the way through the pipeline, which is more work than it is worth here. It only happens once, and the last hour view hides it after an hour.
