@@ -40,6 +40,11 @@ VALUES %s
 ON CONFLICT (kafka_partition, kafka_offset) DO NOTHING
 """
 
+HEARTBEAT_SQL = """
+    INSERT INTO pipeline_heartbeat (batch_id, events_processed, written_at)
+    VALUES (%s, %s, now())
+"""
+
 WINDOW_UPSERT_SQL = """
 INSERT INTO alert_window_agg (window_type, window_start, window_end, region, severity, alert_count, computed_at)
 VALUES %s
@@ -142,6 +147,8 @@ def process_batch(batch_df, batch_id):
                 execute_values(cur, UPSERT_SQL, upserts)
             if dead:
                 execute_values(cur, DEAD_LETTER_SQL, dead)
+            # one heartbeat row per batch: how many messages this batch read (good and bad)
+            cur.execute(HEARTBEAT_SQL, (batch_id, len(good_rows) + len(bad_rows)))
     finally:
         conn.close()
 
@@ -202,4 +209,26 @@ raw.writeStream.queryName("raw_alerts") \
 start_window_query("tumbling_5m", "checkpoints/tumbling_5m", "5 minutes")
 start_window_query("sliding_15m", "checkpoints/sliding_15m", "15 minutes", "5 minutes")
 
-spark.streams.awaitAnyTermination()  # runs until ctrl+c
+# the per-batch heartbeat goes quiet when no alerts come in, which looks the same as a dead job.
+# so every 15 seconds, if nothing was written in the last 30, write an idle row (batch_id -1).
+# awaitAnyTermination raises if a query crashes, so a dead job stops heartbeating
+IDLE_HEARTBEAT_SQL = """
+    INSERT INTO pipeline_heartbeat (batch_id, events_processed, written_at)
+    SELECT -1, 0, now()
+    WHERE NOT EXISTS (
+        SELECT 1 FROM pipeline_heartbeat WHERE written_at > now() - interval '30 seconds'
+    )
+"""
+
+
+def write_idle_heartbeat():
+    conn = pg_connect()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(IDLE_HEARTBEAT_SQL)
+    finally:
+        conn.close()
+
+
+while not spark.streams.awaitAnyTermination(15):  # False means "15 seconds passed, nothing died"
+    write_idle_heartbeat()
