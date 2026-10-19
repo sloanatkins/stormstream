@@ -16,3 +16,6 @@ poller/dead_letter.jsonl
 
 # macOS
 .DS_Store
+
+# Editor
+*.code-workspace
