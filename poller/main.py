@@ -1,7 +1,33 @@
-"""StormStream poller: NWS -> diff -> Kafka.
-Run from the repo root:  python -m poller.main --once   (one cycle, for testing)
-                         python -m poller.main          (loops forever)
 """
+StormStream Poller
+==================
+
+Polls the NWS alerts API, works out what changed since the last poll,
+and sends only the changes to Kafka.
+
+Flow each cycle:
+1. fetch active alerts (real ones only, no tests or exercises)
+2. clean each one, bad ones go to a dead letter file
+3. diff against what was seen last time
+4. send the changes to Kafka, then save the new seen state
+
+Run from the repo root:
+    python -m poller.main --once   (one cycle, for testing)
+    python -m poller.main          (loops forever)
+
+Settings (env vars or a .env file):
+- NWS_POLL_INTERVAL_SECONDS (default 45)
+- NWS_REGION_FILTER (default: all of the US)
+- ALERTS_TOPIC (default weather-alerts)
+- KAFKA_BOOTSTRAP_HOST (default localhost:9092)
+- DEAD_LETTER_PATH (default poller/dead_letter.jsonl)
+- SEEN_DB_PATH (default poller/seen.sqlite)
+
+Dependencies:
+- requests
+- kafka-python
+"""
+
 import argparse
 import json
 import logging
@@ -9,6 +35,7 @@ import os
 import time
 
 import requests
+from kafka import KafkaProducer
 from kafka.errors import KafkaError
 
 from poller.diff import diff
@@ -19,25 +46,39 @@ from poller.store import SeenStore
 log = logging.getLogger("poller")
 
 
-def load_env_file(path=".env"):
-    # tiny loader so I don't need python-dotenv. Real env vars win over the file
+# ── Helpers ──────────────────────────────────────────────────────────
+def load_env_file(path: str = ".env") -> None:
+    """
+    Load KEY=value lines from a .env file into the environment.
+
+    Tiny loader so python-dotenv isn't needed. Real env vars win
+    over the file.
+    """
+
     if not os.path.exists(path):
         return
-    for line in open(path):
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
 
 
-def dead_letter(path, reason, raw):
+def dead_letter(path: str, reason: str, raw: dict) -> None:
+    """Append a bad alert and why it was rejected to the dead letter file."""
+
     with open(path, "a") as f:
         f.write(json.dumps({"reason": reason, "raw": raw}) + "\n")
 
 
-def run_cycle(producer, store, topic, area, dead_letter_path):
+# ── One poll cycle ───────────────────────────────────────────────────
+def run_cycle(producer: KafkaProducer, store: SeenStore, topic: str,
+              area: str | None, dead_letter_path: str) -> None:
+    """Fetch, clean, diff and send once. Raises if the API or Kafka fails."""
+
     features = fetch_active(area=area)
-    # skip tests and exercises, we only want real alerts
+    # Skip tests and exercises, we only want real alerts
     features = [f for f in features if (f.get("properties") or {}).get("status") == "Actual"]
 
     events = []
@@ -54,13 +95,16 @@ def run_cycle(producer, store, topic, area, dead_letter_path):
     to_send, new_seen = diff(seen, events)
     send_events(producer, topic, to_send)
 
-    # only save AFTER the flush worked. If kafka was down we raised before this line,
-    # so the same changes get sent again next cycle
+    # Only save AFTER the flush worked. If kafka was down we raised before
+    # this line, so the same changes get sent again next cycle
     store.save(new_seen)
     log.info("polled %d alerts, sent %d changes, %d bad", len(features), len(to_send), bad)
 
 
-def main():
+# ── Main loop ────────────────────────────────────────────────────────
+def main() -> None:
+    """Read settings, then poll forever (or once with --once)."""
+
     load_env_file()
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true", help="run one cycle and exit")
@@ -90,7 +134,7 @@ def main():
 
         if args.once:
             break
-        # wait longer after each failure in a row: 2x, 4x, 8x... capped at 10 min
+        # Wait longer after each failure in a row: 2x, 4x, 8x... capped at 10 min
         wait = min(interval * 2 ** failures, 600) if failures else interval
         time.sleep(wait)
 

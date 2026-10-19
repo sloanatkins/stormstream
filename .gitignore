@@ -1,10 +1,18 @@
+# Secrets and local settings
 .env
+
+# Python
 __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
-checkpoints/
-*.sqlite
-.DS_Store
 
+# Spark job state (offsets and window state, rebuilt if deleted)
+checkpoints/
+
+# The poller's memory of what it has seen, and its rejected alerts
+*.sqlite
 poller/dead_letter.jsonl
+
+# macOS
+.DS_Store
