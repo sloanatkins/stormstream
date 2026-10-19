@@ -133,3 +133,17 @@ Running log of build decisions. Newest at the bottom.
 **Chart bars are labeled by when the window ends** ("the 15 minutes ending at 4:05 PM") with plain names instead of tumbling_5m and sliding_15m, and a last hour / 6 hours / everything switch.
 
 **The startup spike is a known limitation.** On a fresh start the first poll reports every active alert as new, so one window shows about 470 events. Fixing it properly means marking the first poll as a snapshot all the way through the pipeline, which is more work than it is worth here. It only happens once, and the last hour view hides it after an hour.
+
+## Dashboard polish round 2 (after the pipeline went down for a day)
+
+**What happened.** My Mac logged me out on Sunday morning and everything stopped: Docker, the poller, and the Spark job. When I restarted on Monday the dashboard had a gap of about a day in the chart and a second huge spike on the right. The gap is real, the pipeline was not running. The spike is the same startup spike as before: the poller's local store was a day old, so it reported all ~365 active alerts as new at once. I did not change either one. I added a line to the chart caption saying gaps mean the pipeline was not running, and put dates on the time axis, because with only times on it I could not tell how long the gap was.
+
+**Map.** Hover now shows the state name, the worst severity, and the number of alerts. Plotly draws lakes as white shapes on top of the states by default, which showed up as holes in Utah (Great Salt Lake) and Florida (Lake Okeechobee). I turned lakes off. Alaska and Hawaii are drawn as small insets under the Southwest. That is how this map projection works, so I left it.
+
+**Filters.** The sidebar region and severity filters changed the metrics, map and table but not the chart, because the chart query did not select the region column. It does now.
+
+**Pinned dependencies.** requirements.txt had no versions, so a fresh clone could install newer Streamlit, pandas or plotly and behave differently. I pinned everything to the versions I tested with. I first ran pip list in the wrong conda environment (base instead of stormstream) and got Streamlit 1.45 instead of 1.66, so the lesson is to check which environment the terminal is in before copying versions.
+
+**Not doing: running it 24/7.** The pipeline only runs while my laptop is on. Running it all the time would mean a small cloud server (Kafka plus Spark needs about 4 GB of RAM, so roughly $30 a month) and a day or two of work on containers and secrets. For a portfolio project I decided the README, screenshots and a demo video cover what matters, since a dead link looks worse than no link. I may deploy it to EC2 later as an extra.
+
+**Not doing: dashboard tests.** app.py runs Streamlit code when imported, so testing its helper functions would mean splitting them into a separate file. That is a refactor for little gain here, and the 30 pipeline tests already cover the parts that carry the logic.
